@@ -7,7 +7,13 @@ const userSockets = new Map(); // Track userId -> socketId mapping
 const initSocket = (server) => {
     io = socketIo(server, {
         cors: {
-            origin: ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5175", "http://127.0.0.1:5175"],
+            origin: [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:5175",
+                "http://127.0.0.1:5175",
+                "https://mychat-frontend.vercel.app"
+            ],
             methods: ["GET", "POST"]
         },
         pingTimeout: 60000,
@@ -24,7 +30,7 @@ const initSocket = (server) => {
                 currentUserId = userId.toString();
                 socket.join(currentUserId);
                 userSockets.set(currentUserId, socket.id);
-                
+
                 // Update user online status
                 await User.findByIdAndUpdate(currentUserId, {
                     isOnline: true,
@@ -66,7 +72,7 @@ const initSocket = (server) => {
         // Typing indicator
         socket.on('typing', ({ recipientId, isTyping }) => {
             if (!currentUserId) return;
-            
+
             io.to(recipientId.toString()).emit('typing', {
                 senderId: currentUserId,
                 isTyping: isTyping !== false
@@ -76,7 +82,7 @@ const initSocket = (server) => {
         // Stop typing indicator
         socket.on('stopTyping', ({ recipientId }) => {
             if (!currentUserId) return;
-            
+
             io.to(recipientId.toString()).emit('typing', {
                 senderId: currentUserId,
                 isTyping: false
@@ -90,7 +96,7 @@ const initSocket = (server) => {
             try {
                 const Message = require('../models/Message');
                 const message = await Message.findById(messageId);
-                
+
                 if (message && message.senderId.toString() === senderId) {
                     message.status = 'read';
                     await message.save();
@@ -109,7 +115,7 @@ const initSocket = (server) => {
         // Handle disconnect
         socket.on('disconnect', async () => {
             console.log('Client disconnected:', socket.id);
-            
+
             if (currentUserId) {
                 userSockets.delete(currentUserId);
 

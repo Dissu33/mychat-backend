@@ -8,11 +8,15 @@ const app = express();
 
 // Middleware
 app.use(cors({
-    origin: true, // Reflects the request origin
+    origin: ["https://mychat-frontend.vercel.app", "http://localhost:5173", "http://127.0.0.1:5173"],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Enable pre-flight requests for all routes
+app.options('*', cors());
+
 app.use(express.json());
 
 // Serve uploaded files

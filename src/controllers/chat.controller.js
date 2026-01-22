@@ -16,7 +16,7 @@ exports.uploadMedia = async (req, res) => {
     try {
         const fileType = req.body.fileType || 'image'; // image, video, audio
         const fileUrl = `/uploads/media/${req.file.filename}`;
-        
+
         // Determine message type based on file type
         let messageType = 'image';
         if (fileType === 'video') messageType = 'video';
@@ -72,7 +72,7 @@ exports.sendMessage = async (req, res) => {
             chat = await Chat.create({
                 participants: [senderId, recipientId],
                 unreadCount: new Map()
-            }); 
+            });
         }
 
         // Create message
@@ -88,12 +88,21 @@ exports.sendMessage = async (req, res) => {
         if (forwardedFrom) messageData.forwardedFrom = forwardedFrom;
 
         const message = await Message.create(messageData);
-        
+
         // Populate sender info for real-time emission
         await message.populate('senderId', 'name phoneNumber profilePicture');
 
         // Update chat
         chat.lastMessage = message._id;
+
+        // Unhide chat if it was hidden/deleted by either party so it reappears
+        if (chat.deletedBy && chat.deletedBy.length > 0) {
+            chat.deletedBy = chat.deletedBy.filter(id =>
+                id.toString() !== senderId.toString() &&
+                id.toString() !== recipientId.toString()
+            );
+        }
+
         const currentUnread = chat.unreadCount.get(recipientId.toString()) || 0;
         chat.unreadCount.set(recipientId.toString(), currentUnread + 1);
         await chat.save();
@@ -156,8 +165,8 @@ exports.getChatHistory = async (req, res) => {
 
         // Mark messages as read when user opens chat
         const unreadMessages = messages.filter(
-            msg => msg.senderId._id.toString() !== currentUserId.toString() && 
-                   msg.status !== 'read'
+            msg => msg.senderId && msg.senderId._id.toString() !== currentUserId.toString() &&
+                msg.status !== 'read'
         );
 
         if (unreadMessages.length > 0) {
@@ -194,7 +203,9 @@ exports.getChats = async (req, res) => {
     const currentUserId = req.userId;
     try {
         const chats = await Chat.find({
-            participants: { $in: [currentUserId] }
+            participants: { $in: [currentUserId] },
+            deletedBy: { $ne: currentUserId }, // Exclude hidden chats
+            archivedBy: { $ne: currentUserId } // Exclude archived chats
         })
             .populate('participants', 'phoneNumber profilePicture about isOnline lastSeen privacySettings')
             .populate({
@@ -216,24 +227,75 @@ exports.getChats = async (req, res) => {
         // Format chats with unread count and saved names
         const formattedChats = chats.map(chat => {
             const otherParticipant = chat.participants.find(
-                p => p._id.toString() !== currentUserId.toString()
+                p => p && p._id.toString() !== currentUserId.toString()
             );
             const unreadCount = chat.unreadCount.get(currentUserId.toString()) || 0;
-            
+
+            // If other participant is deleted (null), we still return the chat but indicate deleted user
+            if (!otherParticipant) {
+                return {
+                    ...chat.toObject(),
+                    otherParticipant: {
+                        _id: 'deleted',
+                        phoneNumber: 'Deleted User',
+                        displayName: 'Deleted User',
+                        savedName: 'Deleted User',
+                        profilePicture: null
+                    },
+                    unreadCount
+                };
+            }
+
             // Add saved name if exists
-            const savedName = contactMap[otherParticipant?._id.toString()] || null;
-            const displayName = savedName || otherParticipant?.phoneNumber;
+            const savedName = contactMap[otherParticipant._id.toString()] || null;
+            const displayName = savedName || otherParticipant.phoneNumber;
 
             return {
                 ...chat.toObject(),
-                otherParticipant: otherParticipant ? {
+                otherParticipant: {
                     ...otherParticipant.toObject(),
                     savedName,
                     displayName
-                } : null,
+                },
                 unreadCount
             };
         });
+
+        // Check for Default Support Contact
+        const defaultSupportPhone = '+917888453659';
+
+        // Only if current user is not the support user
+        // We need to fetch current user's phone to check this, or just check ID if we knew it
+        // Simpler: fetch support user first
+        const supportUser = await User.findOne({ phoneNumber: defaultSupportPhone });
+
+        if (supportUser && supportUser._id.toString() !== currentUserId.toString()) {
+            // Check if already in chats
+            const alreadyHasChat = formattedChats.some(chat =>
+                chat.otherParticipant &&
+                chat.otherParticipant._id.toString() === supportUser._id.toString()
+            );
+
+            if (!alreadyHasChat) {
+                // Add virtual chat
+                const savedName = contactMap[supportUser._id.toString()] || null;
+                const displayName = savedName || supportUser.name || 'Team'; // Use 'Team' or name if set
+
+                formattedChats.unshift({
+                    _id: 'virtual_' + supportUser._id, // Client uses this for key
+                    participants: [supportUser], // Simplified
+                    unreadCount: 0,
+                    lastMessage: null, // Shows as "No messages" or we can mock one
+                    createdAt: new Date(),
+                    updatedAt: new Date(), // Put it at the top
+                    otherParticipant: {
+                        ...supportUser.toObject(),
+                        savedName,
+                        displayName: displayName || supportUser.phoneNumber
+                    }
+                });
+            }
+        }
 
         res.status(200).json(formattedChats);
     } catch (error) {
@@ -243,33 +305,97 @@ exports.getChats = async (req, res) => {
 };
 
 /**
- * Get all users (contacts) with online status and saved contact names
+ * Search user by phone number to start a new chat
  */
-exports.getUsers = async (req, res) => {
+exports.searchUserByPhone = async (req, res) => {
     try {
+        const { phoneNumber } = req.body;
         const currentUserId = req.userId;
-        const users = await User.find({ _id: { $ne: currentUserId } })
-            .select('phoneNumber _id profilePicture about isOnline lastSeen privacySettings')
-            .sort({ phoneNumber: 1 });
 
-        // Get saved contact names for current user
-        const contacts = await Contact.find({ userId: currentUserId });
-        const contactMap = {};
-        contacts.forEach(contact => {
-            contactMap[contact.contactUserId.toString()] = contact.savedName;
+        if (!phoneNumber) {
+            return res.status(400).json({ error: 'Phone number is required' });
+        }
+
+        // Find user by phone number
+        const user = await User.findOne({ phoneNumber });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        if (user._id.toString() === currentUserId.toString()) {
+            return res.status(400).json({ error: 'Cannot chat with yourself' });
+        }
+
+        // Check if chat already exists
+        const existingChat = await Chat.findOne({
+            participants: { $all: [currentUserId, user._id] }
         });
 
-        // Add saved names to users
-        const usersWithContacts = users.map(user => ({
-            ...user.toObject(),
-            savedName: contactMap[user._id.toString()] || null,
-            displayName: contactMap[user._id.toString()] || user.phoneNumber
-        }));
+        res.status(200).json({
+            user: {
+                _id: user._id,
+                phoneNumber: user.phoneNumber,
+                profilePicture: user.profilePicture,
+                about: user.about,
+                isOnline: user.isOnline,
+                lastSeen: user.lastSeen,
+                privacySettings: user.privacySettings
+            },
+            chatId: existingChat ? existingChat._id : null
+        });
 
-        res.status(200).json(usersWithContacts);
     } catch (error) {
-        console.error('Get Users Error:', error);
-        res.status(500).json({ error: 'Failed to fetch users' });
+        console.error('Search User Error:', error);
+        res.status(500).json({ error: 'Failed to search user' });
+    }
+};
+
+/**
+ * Start a new chat with a user (creates empty chat or returns existing)
+ */
+exports.startChat = async (req, res) => {
+    try {
+        const { userId } = req.body;
+        const currentUserId = req.userId;
+
+        if (!userId) {
+            return res.status(400).json({ error: 'User ID is required' });
+        }
+
+        // Verify user exists
+        const otherUser = await User.findById(userId);
+        if (!otherUser) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Check if chat already exists
+        let chat = await Chat.findOne({
+            participants: { $all: [currentUserId, userId] }
+        });
+
+        if (!chat) {
+            chat = await Chat.create({
+                participants: [currentUserId, userId],
+                unreadCount: new Map()
+            });
+        }
+
+        // Populate participants for frontend
+        await chat.populate('participants', 'phoneNumber profilePicture about isOnline lastSeen privacySettings');
+
+        // Format for response
+        const formattedChat = {
+            ...chat.toObject(),
+            otherParticipant: chat.participants.find(p => p._id.toString() !== currentUserId.toString()),
+            unreadCount: 0
+        };
+
+        res.status(200).json(formattedChat);
+
+    } catch (error) {
+        console.error('Start Chat Error:', error);
+        res.status(500).json({ error: 'Failed to start chat' });
     }
 };
 
@@ -290,13 +416,14 @@ exports.updateMessageStatus = async (req, res) => {
 
     try {
         const message = await Message.findById(messageId).populate('senderId', '_id');
-        
+
         if (!message) {
             return res.status(404).json({ error: 'Message not found' });
         }
 
         // Only recipient can update status
-        if (message.senderId._id.toString() === currentUserId.toString()) {
+        // If sender is deleted (null), anyone can update or we treat as valid
+        if (message.senderId && message.senderId._id.toString() === currentUserId.toString()) {
             return res.status(403).json({ error: 'Cannot update own message status' });
         }
 
@@ -334,7 +461,7 @@ exports.addReaction = async (req, res) => {
 
     try {
         const message = await Message.findById(messageId).populate('senderId', '_id');
-        
+
         if (!message) {
             return res.status(404).json({ error: 'Message not found' });
         }
@@ -380,7 +507,7 @@ exports.removeReaction = async (req, res) => {
 
     try {
         const message = await Message.findById(messageId);
-        
+
         if (!message) {
             return res.status(404).json({ error: 'Message not found' });
         }
@@ -421,13 +548,13 @@ exports.deleteMessage = async (req, res) => {
 
     try {
         const message = await Message.findById(messageId).populate('senderId', '_id');
-        
+
         if (!message) {
             return res.status(404).json({ error: 'Message not found' });
         }
 
         // Check authorization
-        const isSender = message.senderId._id.toString() === currentUserId.toString();
+        const isSender = message.senderId && message.senderId._id.toString() === currentUserId.toString();
         if (!isSender && deleteForEveryone) {
             return res.status(403).json({ error: 'Only sender can delete for everyone' });
         }
@@ -483,7 +610,7 @@ exports.forwardMessage = async (req, res) => {
 
     try {
         const originalMessage = await Message.findById(messageId);
-        
+
         if (!originalMessage) {
             return res.status(404).json({ error: 'Message not found' });
         }
@@ -522,6 +649,15 @@ exports.forwardMessage = async (req, res) => {
 
             // Update chat
             chat.lastMessage = forwardedMessage._id;
+
+            // Unhide chat if hidden
+            if (chat.deletedBy && chat.deletedBy.length > 0) {
+                chat.deletedBy = chat.deletedBy.filter(id =>
+                    id.toString() !== senderId.toString() &&
+                    id.toString() !== recipientId.toString()
+                );
+            }
+
             const currentUnread = chat.unreadCount.get(recipientId.toString()) || 0;
             chat.unreadCount.set(recipientId.toString(), currentUnread + 1);
             await chat.save();
@@ -606,6 +742,81 @@ exports.deleteContactName = async (req, res) => {
     }
 };
 
+// ... (previous code)
+
+/**
+ * Toggle archive status of a chat
+ */
+exports.toggleArchiveChat = async (req, res) => {
+    const { chatId } = req.body;
+    const currentUserId = req.userId;
+
+    try {
+        const chat = await Chat.findById(chatId);
+        if (!chat) return res.status(404).json({ error: 'Chat not found' });
+
+        const isArchived = chat.archivedBy && chat.archivedBy.includes(currentUserId);
+
+        if (isArchived) {
+            chat.archivedBy = chat.archivedBy.filter(id => id.toString() !== currentUserId.toString());
+        } else {
+            if (!chat.archivedBy) chat.archivedBy = [];
+            chat.archivedBy.push(currentUserId);
+        }
+
+        await chat.save();
+        res.status(200).json({ message: isArchived ? 'Chat unarchived' : 'Chat archived', archived: !isArchived });
+    } catch (error) {
+        console.error('Archive Chat Error:', error);
+        res.status(500).json({ error: 'Failed to toggle archive' });
+    }
+};
+
+/**
+ * Delete chat (hide from list)
+ */
+exports.deleteChat = async (req, res) => {
+    const { chatId } = req.body;
+    const currentUserId = req.userId;
+
+    try {
+        const chat = await Chat.findById(chatId);
+        if (!chat) return res.status(404).json({ error: 'Chat not found' });
+
+        if (!chat.deletedBy) chat.deletedBy = [];
+        if (!chat.deletedBy.includes(currentUserId)) {
+            chat.deletedBy.push(currentUserId);
+            await chat.save();
+        }
+
+        res.status(200).json({ message: 'Chat deleted' });
+    } catch (error) {
+        console.error('Delete Chat Error:', error);
+        res.status(500).json({ error: 'Failed to delete chat' });
+    }
+};
+
+/**
+ * Clear chat history
+ */
+exports.clearChat = async (req, res) => {
+    const { chatId } = req.body;
+    const currentUserId = req.userId;
+
+    try {
+        // Mark all messages in this chat as deleted for this user
+        await Message.updateMany(
+            { chatId: chatId },
+            { $addToSet: { deletedFor: currentUserId } }
+        );
+
+        res.status(200).json({ message: 'Chat cleared' });
+    } catch (error) {
+        console.error('Clear Chat Error:', error);
+        res.status(500).json({ error: 'Failed to clear chat' });
+    }
+};
+
 // Helper function to update message status
 async function updateMessageStatus(messageId, status, senderId) {
     try {
@@ -613,11 +824,13 @@ async function updateMessageStatus(messageId, status, senderId) {
         if (message && message.status !== status) {
             message.status = status;
             await message.save();
-            
-            getIO().to(senderId.toString()).emit('messageStatusUpdate', {
-                messageId: message._id.toString(),
-                status
-            });
+
+            if (message.senderId) {
+                getIO().to(senderId.toString()).emit('messageStatusUpdate', {
+                    messageId: message._id.toString(),
+                    status
+                });
+            }
         }
     } catch (error) {
         console.error('Update Message Status Helper Error:', error);

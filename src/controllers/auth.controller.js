@@ -17,9 +17,9 @@ exports.sendOtp = async (req, res) => {
 
     if (BYPASS_OTP) {
         console.log(`[DEV] OTP sending bypassed for ${phoneNumber}`);
-        return res.status(200).json({ 
-            status: 'approved', 
-            message: 'OTP bypassed (dev mode). Use any OTP like 000000 or 123456 to login.' 
+        return res.status(200).json({
+            status: 'approved',
+            message: 'OTP bypassed (dev mode). Use any OTP like 000000 or 123456 to login.'
         });
     }
 
@@ -35,9 +35,9 @@ exports.sendOtp = async (req, res) => {
         console.error('Twilio Error:', error.message);
         // If bypass is enabled, still return success
         if (BYPASS_OTP) {
-            return res.status(200).json({ 
-                status: 'approved', 
-                message: 'OTP bypassed (dev mode)' 
+            return res.status(200).json({
+                status: 'approved',
+                message: 'OTP bypassed (dev mode)'
             });
         }
         res.status(500).json({ error: error.message || 'Failed to send OTP' });
@@ -268,6 +268,44 @@ exports.uploadProfilePicture = async (req, res) => {
     } catch (error) {
         console.error('Upload Profile Picture Error:', error);
         res.status(500).json({ error: 'Failed to upload profile picture' });
+    }
+};
+
+/**
+ * Remove profile picture
+ */
+exports.removeProfilePicture = async (req, res) => {
+    const userId = req.userId;
+
+    try {
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        user.profilePicture = null;
+        await user.save();
+
+        // Emit profile update to all connected clients
+        const { getIO } = require('../socket/socket');
+        try {
+            getIO().emit('profileUpdated', {
+                userId: user._id.toString(),
+                profilePicture: null,
+                about: user.about,
+                name: user.name
+            });
+        } catch (socketError) {
+            console.error('Socket emission error:', socketError);
+        }
+
+        res.status(200).json({
+            message: 'Profile picture removed successfully',
+            user
+        });
+    } catch (error) {
+        console.error('Remove Profile Picture Error:', error);
+        res.status(500).json({ error: 'Failed to remove profile picture' });
     }
 };
 

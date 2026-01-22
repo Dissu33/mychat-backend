@@ -14,7 +14,19 @@ const chatSchema = new mongoose.Schema({
         type: Map,
         of: Number,
         default: {}
-    }
+    },
+    archivedBy: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }],
+    deletedBy: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }],
+    hiddenBy: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }]
 }, { timestamps: true });
 
 // Index for faster participant queries

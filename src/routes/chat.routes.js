@@ -22,7 +22,13 @@ router.post('/contact/save', chatController.saveContactName);
 router.post('/contact/delete', chatController.deleteContactName);
 
 // Chat routes
-router.get('/users', chatController.getUsers);
+// Chat Actions
+router.post('/archive', chatController.toggleArchiveChat);
+router.post('/delete', chatController.deleteChat);
+router.post('/clear', chatController.clearChat);
+
+router.post('/search', chatController.searchUserByPhone);
+router.post('/start', chatController.startChat);
 router.get('/:userId', chatController.getChatHistory);
 router.get('/', chatController.getChats);
 

@@ -50,7 +50,7 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 // Index for faster queries
-userSchema.index({ phoneNumber: 1 });
+// userSchema.index({ phoneNumber: 1 }); // Already defined in schema path
 userSchema.index({ lastSeen: -1 });
 
 module.exports = mongoose.model('User', userSchema);

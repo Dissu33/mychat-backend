@@ -6,16 +6,18 @@ const chatRoutes = require('./routes/chat.routes');
 
 const app = express();
 
-// Middleware
-app.use(cors({
-    origin: ["https://mychat-frontend.vercel.app", "http://localhost:5173", "http://127.0.0.1:5173"],
+const corsOptions = {
+    origin: ["https://mychat-frontend.vercel.app", "http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5175", "http://127.0.0.1:5175"],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization']
-}));
+};
 
-// Enable pre-flight requests for all routes
-app.options('*', cors());
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Handle preflight requests matching the same options
+app.options('*', cors(corsOptions));
 
 app.use(express.json());
 

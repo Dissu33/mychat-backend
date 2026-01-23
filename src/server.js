@@ -5,7 +5,7 @@ const app = require('./app');
 const connectDB = require('./config/db');
 const { initSocket } = require('./socket/socket');
 const dotenv = require('dotenv');
-
+// hi
 dotenv.config();
 
 // Connect Database
